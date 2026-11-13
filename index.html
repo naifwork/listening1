@@ -355,7 +355,7 @@
     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
       <div>
         <h1>🎧 استوديو الاستماع التفاعلي (Listening Studio)</h1>
-        <p class="sub">تعدد شخصيات لا محدود، نطق تعاقبي بأصوات المتصفح، استماع أعمى وتصدير صوتي محلي نقي (WAV) .</p>
+        <p class="sub">تعدد شخصيات لا محدود، نطق تعاقبي بأصوات المتصفح، استماع أعمى وتصدير صوتي محلي نقي (WAV) متوافق 100% مع جيت هب.</p>
       </div>
 
       <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
@@ -612,20 +612,135 @@ Narrator: The doctor examined the patient carefully."></textarea>
     { border: "#818cf8", nameColor: "#c7d2fe" }
   ];
 
+  const CLOUD_VOICE_WORKER_URL = 'https://elapvoice.naif-work-xw.workers.dev';
+  let cloudVoiceAvailable = true;
+  let activeCloudAudio = null;
+
+  function removeCloudVoiceOptions() {
+    cloudVoiceAvailable = false;
+    let changed = false;
+    Object.keys(speakersConfig).forEach(spk => {
+      if (String(speakersConfig[spk].voiceIdx).startsWith('cloud:')) {
+        speakersConfig[spk].voiceIdx = 0;
+        changed = true;
+      }
+    });
+    Object.keys(savedSpeakerVoices).forEach(spk => {
+      if (String(savedSpeakerVoices[spk]?.voiceIdx).startsWith('cloud:')) {
+        savedSpeakerVoices[spk].voiceIdx = 0;
+        changed = true;
+      }
+    });
+    if (changed) {
+      localStorage.setItem('listening_speaker_voices', JSON.stringify(savedSpeakerVoices));
+    }
+    document.querySelectorAll('#speakersContainer select option[value^="cloud:"]').forEach(opt => opt.remove());
+    renderSpeakerCards();
+  }
+
+  async function verifyCloudVoiceHealth() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const res = await fetch(`${CLOUD_VOICE_WORKER_URL}?lang=en-US&text=hi`, {
+        method: 'GET',
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        removeCloudVoiceOptions();
+      }
+    } catch (_) {
+      clearTimeout(timer);
+      removeCloudVoiceOptions();
+    }
+  }
+
+  function stopAllSpeechAudio() {
+    if (activeCloudAudio) {
+      try {
+        activeCloudAudio.onended = null;
+        activeCloudAudio.onerror = null;
+        activeCloudAudio.pause();
+        activeCloudAudio.currentTime = 0;
+      } catch (_) {}
+      activeCloudAudio = null;
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  }
+
+  function speakBrowserFallback(text, voiceIdx, rate, onDone = null) {
+    if (!('speechSynthesis' in window)) {
+      if (onDone) onDone();
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(text);
+    const numIdx = parseInt(voiceIdx, 10);
+    if (!isNaN(numIdx) && availableVoices[numIdx]) {
+      utter.voice = availableVoices[numIdx];
+    } else if (availableVoices[0]) {
+      utter.voice = availableVoices[0];
+    }
+    utter.rate = rate || 0.9;
+    utter.onend = () => { if (onDone) onDone(); };
+    utter.onerror = () => { if (onDone) onDone(); };
+    window.speechSynthesis.speak(utter);
+  }
+
+  function playListeningSpeechUnified(text, voiceVal, rate = 0.9, onDone = null) {
+    if (!text || !text.trim()) {
+      if (onDone) onDone();
+      return;
+    }
+    stopAllSpeechAudio();
+    const vStr = String(voiceVal ?? '');
+
+    if (vStr.startsWith('cloud:')) {
+      const lang = vStr.replace('cloud:', '');
+      const url = `${CLOUD_VOICE_WORKER_URL}?lang=${encodeURIComponent(lang)}&text=${encodeURIComponent(text)}`;
+      const audio = new Audio(url);
+      audio.playbackRate = rate || 0.9;
+      activeCloudAudio = audio;
+
+      let fellBack = false;
+      const fallbackToLocal = () => {
+        if (fellBack) return;
+        fellBack = true;
+        if (activeCloudAudio === audio) activeCloudAudio = null;
+        removeCloudVoiceOptions();
+        speakBrowserFallback(text, 0, rate, onDone);
+      };
+
+      audio.onended = () => {
+        if (activeCloudAudio === audio) activeCloudAudio = null;
+        if (!fellBack && onDone) onDone();
+      };
+      audio.onerror = fallbackToLocal;
+      audio.play().catch(fallbackToLocal);
+      return;
+    }
+
+    speakBrowserFallback(text, voiceVal, rate, onDone);
+  }
+
   window.addEventListener('DOMContentLoaded', () => {
     populateVoices();
     loadSampleMultiDialogue();
+    verifyCloudVoiceHealth();
   });
 
   function populateVoices() {
-    if (!('speechSynthesis' in window)) return;
-    const all = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
-    all.sort((a, b) => {
-      const aNat = a.name.includes('Natural') || a.name.includes('Online');
-      const bNat = b.name.includes('Natural') || b.name.includes('Online');
-      return (bNat ? 1 : 0) - (aNat ? 1 : 0);
-    });
-    availableVoices = all;
+    if ('speechSynthesis' in window) {
+      const all = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
+      all.sort((a, b) => {
+        const aNat = a.name.includes('Natural') || a.name.includes('Online');
+        const bNat = b.name.includes('Natural') || b.name.includes('Online');
+        return (bNat ? 1 : 0) - (aNat ? 1 : 0);
+      });
+      availableVoices = all;
+    }
     renderSpeakerCards();
   }
 
@@ -724,11 +839,16 @@ Narrator: The doctor examined the patient carefully."></textarea>
         const isNat = v.name.includes('Natural') || v.name.includes('Online');
         const cleanName = v.name.replace(/Microsoft |Google /g, '');
         return `
-          <option value="${i}" ${i == cfg.voiceIdx ? 'selected' : ''}>
+          <option value="${i}" ${String(i) === String(cfg.voiceIdx) ? 'selected' : ''}>
             ${isNat ? '⭐ ' : ''}${cleanName} (${v.lang})
           </option>
         `;
       }).join('');
+
+      const cloudOptions = cloudVoiceAvailable ? `
+        <option value="cloud:en-US" ${cfg.voiceIdx === 'cloud:en-US' ? 'selected' : ''}>صوت بديل أمريكي</option>
+        <option value="cloud:en-GB" ${cfg.voiceIdx === 'cloud:en-GB' ? 'selected' : ''}>صوت بديل بريطاني</option>
+      ` : '';
 
       return `
         <div class="speaker-card" style="border-top-color: ${cfg.color.border};">
@@ -741,6 +861,7 @@ Narrator: The doctor examined the patient carefully."></textarea>
               <label style="font-size:0.72rem; color:var(--muted); min-width:40px;">الصوت:</label>
               <select onchange="updateSpeakerVoice('${name}', this.value)" style="width:100%; direction:ltr; text-align:left; font-size:0.76rem; padding:3px 6px;">
                 ${voicesOptions}
+                ${cloudOptions}
               </select>
             </div>
             <div style="display:flex; align-items:center; gap:6px;">
@@ -755,10 +876,10 @@ Narrator: The doctor examined the patient carefully."></textarea>
   }
 
   function updateSpeakerVoice(name, idx) {
-    const voiceNum = parseInt(idx, 10);
-    if (speakersConfig[name]) speakersConfig[name].voiceIdx = voiceNum;
+    const storedVal = String(idx).startsWith('cloud:') ? String(idx) : parseInt(idx, 10);
+    if (speakersConfig[name]) speakersConfig[name].voiceIdx = storedVal;
     savedSpeakerVoices[name] = savedSpeakerVoices[name] || {};
-    savedSpeakerVoices[name].voiceIdx = voiceNum;
+    savedSpeakerVoices[name].voiceIdx = storedVal;
     localStorage.setItem('listening_speaker_voices', JSON.stringify(savedSpeakerVoices));
   }
 
@@ -776,12 +897,8 @@ Narrator: The doctor examined the patient carefully."></textarea>
 
   function testSpeakerVoice(name) {
     const cfg = speakersConfig[name];
-    if (!cfg || !('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(`Hello! I am ${name}, and this is how my voice sounds.`);
-    if (availableVoices[cfg.voiceIdx]) utter.voice = availableVoices[cfg.voiceIdx];
-    utter.rate = cfg.rate || 0.9;
-    window.speechSynthesis.speak(utter);
+    if (!cfg) return;
+    playListeningSpeechUnified(`Hello! I am ${name}, and this is how my voice sounds.`, cfg.voiceIdx, cfg.rate || 0.9);
   }
 
   function promptAddCustomSpeaker() {
@@ -853,11 +970,10 @@ Narrator: The doctor examined the patient carefully."></textarea>
   }
 
   function speakIsolatedWord(word) {
-    if (!('speechSynthesis' in window) || !word) return;
-    window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(word);
-    utter.rate = 0.85;
-    window.speechSynthesis.speak(utter);
+    if (!word) return;
+    const activeSpk = parsedTurns[currentTurnIndex]?.speaker;
+    const cfg = speakersConfig[activeSpk] || Object.values(speakersConfig)[0] || { voiceIdx: 0 };
+    playListeningSpeechUnified(word, cfg.voiceIdx, 0.85);
   }
 
   function checkClozeAnswer(input) {
@@ -954,7 +1070,7 @@ Narrator: The doctor examined the patient carefully."></textarea>
     if (!isPlaying) return;
     isPaused = true;
     clearTimeout(turnTimer);
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    stopAllSpeechAudio();
     updatePlaybackUI('paused');
   }
 
@@ -976,7 +1092,7 @@ Narrator: The doctor examined the patient carefully."></textarea>
     isPlaying = false;
     isPaused = false;
     clearTimeout(turnTimer);
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    stopAllSpeechAudio();
     if (resetToStart) currentTurnIndex = 0;
     updatePlaybackUI('stopped');
     document.querySelectorAll('.dialogue-turn').forEach(b => b.classList.remove('active-turn'));
@@ -1010,26 +1126,13 @@ Narrator: The doctor examined the patient carefully."></textarea>
     const turn = parsedTurns[idx];
     const cfg = speakersConfig[turn.speaker] || { voiceIdx: 0, rate: 0.9 };
 
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-
-    const utter = new SpeechSynthesisUtterance(turn.text);
-    if (availableVoices[cfg.voiceIdx]) utter.voice = availableVoices[cfg.voiceIdx];
-    utter.rate = cfg.rate || 0.9;
-
-    utter.onend = () => {
+    playListeningSpeechUnified(turn.text, cfg.voiceIdx, cfg.rate || 0.9, () => {
       if (!isPlaying || isPaused) return;
       const gap = parseInt(document.getElementById('turnGapSelect').value, 10) || 600;
       turnTimer = setTimeout(() => {
         playSequentialTurn(idx + 1);
       }, gap);
-    };
-
-    utter.onerror = () => {
-      if (isPlaying && !isPaused) playSequentialTurn(idx + 1);
-    };
-
-    window.speechSynthesis.speak(utter);
+    });
   }
 
   function playSingleTurn(idx) {
@@ -1038,11 +1141,7 @@ Narrator: The doctor examined the patient carefully."></textarea>
     highlightTurnBubble(idx);
     const turn = parsedTurns[idx];
     const cfg = speakersConfig[turn.speaker] || { voiceIdx: 0, rate: 0.9 };
-    window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(turn.text);
-    if (availableVoices[cfg.voiceIdx]) utter.voice = availableVoices[cfg.voiceIdx];
-    utter.rate = cfg.rate || 0.9;
-    window.speechSynthesis.speak(utter);
+    playListeningSpeechUnified(turn.text, cfg.voiceIdx, cfg.rate || 0.9);
   }
 
   function repeatCurrentTurnAudio() {
